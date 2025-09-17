@@ -6,12 +6,14 @@ namespace Janartist\Elasticsearch;
 
 use Elasticsearch\Client;
 use Elasticsearch\Common\Exceptions\Missing404Exception;
+use Exception;
 use Hyperf\Collection\Collection;
 use Hyperf\Context\ApplicationContext;
 use Hyperf\Logger\LoggerFactory;
 use Psr\Container\ContainerExceptionInterface;
 use Psr\Container\NotFoundExceptionInterface;
 use stdClass;
+use Throwable;
 use TypeError;
 
 use function Hyperf\Collection\collect;
@@ -644,6 +646,82 @@ class Builder
     {
         $this->aggs[$name] = $aggregation;
         return $this;
+    }
+
+    /**
+     * 根据文档ID更新单个字段.
+     *
+     * @param string|int $id 文档ID
+     * @param array $fields 要更新的字段数组，格式：['field1' => 'value1', 'field2' => 'value2']
+     * @param array $options 额外选项
+     * @return array|false 返回更新结果或 false
+     * @throws Throwable
+     */
+    public function updateFieldById(string|int $id, array $fields, array $options = []): array|false
+    {
+        return $this->updateFields($fields, [
+            'term' => [
+                '_id' => $id,
+            ],
+        ], $options);
+    }
+
+    /**
+     * 批量更新字段（支持多个字段同时更新）.
+     *
+     * @param array $fields 要更新的字段数组，格式：['field1' => 'value1', 'field2' => 'value2']
+     * @param array $query 查询条件
+     * @param array $options 额外选项，支持：
+     *                       - conflicts: 'proceed'|'abort' (默认: 'proceed')
+     *                       - refresh: true|false (默认: false)
+     *                       - wait_for_completion: true|false (默认: true)
+     *                       - slices: int (并行切片数量)
+     * @return array|false 返回更新结果或 false
+     * @throws Throwable
+     */
+    public function updateFields(array $fields, array $query = [], array $options = []): array|false
+    {
+        // 构建 Painless 脚本
+        $scriptParts = [];
+        $params = [];
+
+        foreach ($fields as $field => $value) {
+            $scriptParts[] = "ctx._source.{$field} = params.{$field}";
+            $params[$field] = $value;
+        }
+
+        $script = implode('; ', $scriptParts);
+
+        // 默认选项：处理版本冲突
+        $defaultOptions = [
+            'conflicts' => 'proceed',  // 遇到版本冲突时继续处理
+            'refresh' => false,        // 不立即刷新，提高性能
+        ];
+
+        $updateParams = [
+            'index' => $this->model->getIndex(),
+            'body' => [
+                'script' => [
+                    'source' => $script,
+                    'lang' => 'painless',
+                    'params' => $params,
+                ],
+            ],
+        ];
+
+        // 添加查询条件
+        if (! empty($query)) {
+            $updateParams['body']['query'] = $query;
+        }
+
+        // 合并默认选项和用户选项
+        $updateParams = array_merge($updateParams, $defaultOptions, $options);
+
+        try {
+            return $this->run('updateByQuery', $updateParams);
+        } catch (Exception $e) {
+            throw new Exception('Update fields failed: ' . json_encode($fields) . ' Error: ' . $e->getMessage());
+        }
     }
 
     protected function parseQuery(string $field, string $operate, mixed $value): Builder
